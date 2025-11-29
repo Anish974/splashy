@@ -1,19 +1,17 @@
-# upload_only.py
+# upload_only_netlify.py
 
 """
-Upload already-encoded clips from public/ to Instagram Reels.
+Upload already-encoded clips from public/ to Instagram Reels using Netlify URLs.
 Usage:
-    python upload_only.py           # start from first clip
-    python upload_only.py 17        # start from clip index 17
+    python upload_only_netlify.py           # start from first clip
+    python upload_only_netlify.py 17        # start from clip index 17
 """
 
 import os
-import re
 import sys
 import time
-import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -24,65 +22,13 @@ ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 IG_USER_ID = os.getenv("IG_USER_ID")
 GRAPH_BASE = os.getenv("GRAPH_BASE", "https://graph.facebook.com/v24.0")
 VIDEO_TITLE = os.getenv("VIDEO_TITLE", "Video")
-PORT = int(os.getenv("PORT", "8000"))
-CLOUDFLARED_CMD = os.getenv("CLOUDFLARED_CMD", "cloudflared")
+EPISODE_NUMBER = int(os.getenv("EPISODE_NUMBER", "1"))
+
+# Netlify base URL (apna URL daalo)
+NETLIFY_BASE = os.getenv("NETLIFY_BASE", "https://splashyx.netlify.app")
 
 BASE_DIR = Path.cwd()
 PUBLIC_DIR = BASE_DIR / "public"
-
-
-def start_fastapi_server(port: int = 8000) -> subprocess.Popen:
-    app_py = BASE_DIR / "_temp_fastapi_upload_app.py"
-    app_py.write_text(
-        "from fastapi import FastAPI\n"
-        "from fastapi.staticfiles import StaticFiles\n\n"
-        "app = FastAPI()\n"
-        "app.mount('/files', StaticFiles(directory='public'), name='files')\n"
-    )
-    cmd = [
-        sys.executable, "-m", "uvicorn",
-        "_temp_fastapi_upload_app:app",
-        "--host", "0.0.0.0",
-        "--port", str(port),
-        "--log-level", "warning",
-    ]
-    print(f"Starting FastAPI upload server on port {port}...")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    time.sleep(3)
-    print(f"  Server running at http://localhost:{port}")
-    return proc
-
-
-def start_cloudflared(port: int = 8000, timeout: int = 30) -> Optional[Tuple[subprocess.Popen, str]]:
-    cmd = [CLOUDFLARED_CMD, "tunnel", "--url", f"http://localhost:{port}"]
-    print("Starting cloudflared tunnel for upload...")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-
-    url = None
-    start_time = time.time()
-    pattern = re.compile(r"https?://[\w\-\.]+trycloudflare\.com")
-
-    while time.time() - start_time < timeout:
-        if proc.stdout is None:
-            break
-        line = proc.stdout.readline()
-        if not line:
-            if proc.poll() is not None:
-                print("  cloudflared exited early.")
-                break
-            time.sleep(0.1)
-            continue
-        print("cloudflared:", line.strip())
-        m = pattern.search(line)
-        if m:
-            url = m.group(0)
-            break
-
-    if not url:
-        print("  Failed to get public URL from cloudflared.")
-        return None
-    print("  Public URL:", url)
-    return proc, url
 
 
 def create_media_container(public_url: str, caption: str) -> Optional[str]:
@@ -139,12 +85,12 @@ def main():
         print("ACCESS_TOKEN / IG_USER_ID missing in .env")
         sys.exit(1)
 
-    # start index from CLI
+    # CLI start index (resume support)
     if len(sys.argv) >= 2:
         try:
             start_index = int(sys.argv[1])
         except ValueError:
-            print("Invalid start index, use: python upload_only.py 17")
+            print("Invalid start index, use: python upload_only_netlify.py 17")
             sys.exit(1)
     else:
         start_index = 1
@@ -157,24 +103,22 @@ def main():
     print(f"Found {len(files)} clips in public/")
     print(f"Will start uploading from index {start_index}")
 
-    fastapi_proc = start_fastapi_server(PORT)
-    cf = start_cloudflared(PORT, timeout=30)
-    if not cf:
-        print("Cloudflared tunnel failed; aborting uploads.")
-        fastapi_proc.terminate()
-        return
-    cf_proc, public_base = cf
-
     success = 0
     for idx, f in enumerate(files, start=1):
         if idx < start_index:
-            continue  # skip already-done clips
+            continue  # already done earlier
 
         print(f"\n--- Clip {idx}/{len(files)} :: {f.name} ---")
-        public_url = f"{public_base}/files/{f.name}"
-        base = f"{VIDEO_TITLE} Part {idx}"
+
+        # IMPORTANT: browser me yeh chalna chahiye:
+        # https://splashyx.netlify.app/final_001.mp4
+        public_url = f"{NETLIFY_BASE}/{f.name}"
+
+        # Caption: "TITLE E<episode> P<part> #tags"
+        part_label = f"E{EPISODE_NUMBER} P{idx}"
+        base_caption = f"{VIDEO_TITLE} {part_label}"
         hashtags = "#anime #animereels #reels #edit #fyp"
-        caption = f"{base} {hashtags}"
+        caption = f"{base_caption} {hashtags}"
 
         cid = create_media_container(public_url, caption)
         if not cid:
@@ -182,7 +126,8 @@ def main():
             continue
 
         print("  Waiting 45s before publish...")
-        time.sleep(15)
+        time.sleep(45)
+
         if publish_media(cid):
             success += 1
             print(f"✅ Posted {f.name}")
@@ -195,21 +140,10 @@ def main():
                 time.sleep(30)
             except KeyboardInterrupt:
                 print("\nInterrupted during cooldown. You can resume later with:")
-                print(f"  up.py {idx+1}")
+                print(f"  python upload_only_netlify.py {idx+1}")
                 break
 
     print(f"\nDone. Success: {success}/{len(files)}")
-
-    print("Stopping server and tunnel...")
-    try:
-        fastapi_proc.terminate()
-    except Exception:
-        pass
-    try:
-        cf_proc.terminate()
-    except Exception:
-        pass
-    print("Cleanup complete.")
 
 
 if __name__ == "__main__":
